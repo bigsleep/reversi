@@ -1,0 +1,28 @@
+
+----------------------------------------------------------------------
+20150101 free
+
+freeで作ってみる
+
+StateT GameState Free a
+とか?
+
+Stateは実行側でもってもいい?
+別に持つのも面倒かもしれない
+
+TVar (StateT GameState Free a)
+
+一手ごとに中断する。
+
+step :: Hand -> Machine -> Either Error Machine
+peek :: Machine -> GameState
+
+次のステップに進むのはできそう
+StateTにするとモナド値じゃないと取り出せないか
+
+TVar (GameState, Free a)
+
+freeでなくてもいい気もする
+Hand -> Game -> Game
+とか
+
