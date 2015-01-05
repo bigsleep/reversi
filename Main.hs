@@ -1,6 +1,8 @@
 module Main where
 
-import Reversi
+import Cui (runReversi)
 
-main :: IO
-main = putStrLn ""
+main :: IO ()
+main = do
+    r <- runReversi
+    print r

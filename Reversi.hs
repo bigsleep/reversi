@@ -1,14 +1,13 @@
 {-# LANGUAGE MultiParamTypeClasses, DeriveDataTypeable, DeriveFunctor, TypeFamilies, TemplateHaskell, QuasiQuotes #-}
 module Reversi
-( Reversi
+( Reversi(..)
+, ReversiM
 , Board
-, InnerBoard
-, Player
-, Cell
+, Player(..)
+, Cell(..)
 , ReversiResult
-, black
-, white
-, getInnerBoard
+, reversiStateBoard
+, reversiStateMoves
 , emptyBoard
 , judge
 , move
@@ -18,7 +17,7 @@ module Reversi
 
 import Data.Typeable (Typeable)
 import Control.Monad.Identity (runIdentity)
-import Control.Monad.State (StateT, get, modify)
+import Control.Monad.State (StateT, get, modify, evalStateT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Free (Free(..))
 import Control.Monad (when, liftM)
@@ -28,10 +27,6 @@ import Data.Vector.Unboxed.Deriving (derivingUnbox)
 import Data.Word (Word8)
 
 data Player = Black | White deriving (Show, Eq, Enum)
-
-black, white :: Player
-black = Black
-white = White
 
 data Cell = Empty | Disc Player  deriving (Show, Eq)
 
@@ -50,9 +45,7 @@ derivingUnbox "Cell" [t|Cell -> Word8|] [|cellToWord8|] [|word8ToCell|]
 
 type Matrix = Repa.Array Repa.U Repa.DIM2
 
-type InnerBoard = Matrix Cell
-
-newtype Board = Board { unBoard :: InnerBoard } deriving (Show, Eq)
+type Board = Matrix Cell
 
 data ReversiResult = BlackWin | WhiteWin | Even deriving (Show, Eq, Enum)
 
@@ -63,42 +56,39 @@ data ReversiState = ReversiState
     , reversiStateMoves :: [Move]
     } deriving (Show, Eq)
 
-getInnerBoard :: Board -> InnerBoard
-getInnerBoard = unBoard
-
 emptyBoard :: Int -> Board
-emptyBoard size = Board $ Repa.fromListUnboxed (Repa.Z Repa.:. size Repa.:. size) (replicate (size * size) Empty)
+emptyBoard size = Repa.fromListUnboxed (Repa.Z Repa.:. size Repa.:. size) (replicate (size * size) Empty)
 
-disc :: Player -> Cell
-disc = Disc
+initialState :: ReversiState
+initialState = ReversiState (emptyBoard 0) []
 
-judge :: InnerBoard -> ReversiResult
+judge :: Board -> ReversiResult
 judge = judge' . runIdentity . Repa.foldAllP add (0, 0) . Repa.map f
     where
     judge' (a, b) | a == b = Even
     judge' (a, b) | a > b = BlackWin
     judge' _ = WhiteWin
 
-    add (a, b) (c, d) = (a + b, c + d)
+    add (a, b) (c, d) = (a + c, b + d)
 
     f :: Cell -> (Int, Int)
     f Empty = (0, 0)
     f (Disc Black) = (1, 0)
     f (Disc White) = (0, 1)
 
-move :: Move -> InnerBoard -> [(Int, Int)]
+move :: Move -> Board -> [(Int, Int)]
 move (NoMove _) _ = []
 move (Move _ q) board
     | not (Repa.inShapeRange (toDIM2 (0, 0)) (Repa.extent board) (toDIM2 q))
     || board Repa.! toDIM2 q /= Empty
         = []
 move (Move p (qx, qy)) board =
-    concat [ move' (qx + x, qy + y) (x, y) [(qx, qy)] | x <- [-1..1], y <- [-1..1], (x, y) /= (0, 0)]
+    concat [ move' (qx + x, qy + y) (x, y) [] | x <- [-1..1], y <- [-1..1], (x, y) /= (0, 0)]
 
     where
     start = toDIM2 (0, 0)
     end = Repa.extent board
-    color = disc p
+    color = Disc p
     move' z _ _
         | not (Repa.inShapeRange start end (toDIM2 z))
         || board Repa.! toDIM2 z == Empty
@@ -108,12 +98,12 @@ move (Move p (qx, qy)) board =
             = zs
     move' z @ (a, b) (dx, dy) zs = move' (a + dx, b + dy) (dx, dy) (z : zs)
 
-enumerateMoves :: Player -> InnerBoard -> [(Int, Int)]
+enumerateMoves :: Player -> Board -> [(Int, Int)]
 enumerateMoves p board = [(x, y) | x <- [0..(w-1)], y <- [0..(h-1)], not . null $ move (Move p (x, y)) board]
     where
     Repa.Z Repa.:. w Repa.:. h = Repa.extent board
 
-updateBoard :: Cell -> [(Int, Int)] -> InnerBoard -> InnerBoard
+updateBoard :: Cell -> [(Int, Int)] -> Board -> Board
 updateBoard c ps board = runIdentity . Repa.computeP $ Repa.fromFunction ex f
     where
     ex = Repa.extent board
@@ -122,72 +112,69 @@ updateBoard c ps board = runIdentity . Repa.computeP $ Repa.fromFunction ex f
 
 data Reversi a =
     LoadBoardSize (Int -> a) |
-    InputMove Player ((Int, Int) -> a) |
+    InputMove Board Player ((Int, Int) -> a) |
     OutputState ReversiState a |
     PutError String
     deriving (Typeable, Functor)
 
-type ReversiM = StateT ReversiState (Free Reversi)
+type ReversiM = Free Reversi
 
-loadBoardSize :: ReversiM Int
+loadBoardSize :: StateT ReversiState ReversiM Int
 loadBoardSize = lift . Free . LoadBoardSize $ Pure
 
-inputMove :: Player -> ReversiM (Int, Int)
-inputMove player = lift . Free . InputMove player $ Pure
+inputMove :: Board -> Player -> StateT ReversiState ReversiM (Int, Int)
+inputMove board player = lift . Free . InputMove board player $ Pure
 
-outputState :: ReversiState -> ReversiM ()
+outputState :: ReversiState -> StateT ReversiState ReversiM ()
 outputState s = lift . Free . OutputState s $ Pure ()
 
-putError :: String -> ReversiM a
+putError :: String -> StateT ReversiState ReversiM a
 putError = lift . Free . PutError
 
-pushMove :: Move -> ReversiM ()
+pushMove :: Move -> StateT ReversiState ReversiM ()
 pushMove m = modify $ \s -> s { reversiStateMoves = m : reversiStateMoves s }
 
-getMoves :: ReversiM [Move]
+getMoves :: StateT ReversiState ReversiM [Move]
 getMoves = liftM reversiStateMoves get
 
-getBoard :: ReversiM Board
+getBoard :: StateT ReversiState ReversiM Board
 getBoard = liftM reversiStateBoard get
 
-putBoard :: Board -> ReversiM ()
+putBoard :: Board -> StateT ReversiState ReversiM ()
 putBoard board = modify $ \s -> s { reversiStateBoard = board }
 
 reversi :: ReversiM ReversiResult
-reversi = do
+reversi = flip evalStateT initialState $ do
     size <- loadBoardSize
 
     putBoard $ emptyBoard size
 
     initialMoves $ size `div` 2
 
+    outputState =<< get
+
     takeWhileM_ (const isNotEnd) . take (turnLimit size) $ cycle [turn Black, turn White]
 
-    return . judge . unBoard =<< getBoard
+    return . judge =<< getBoard
 
     where
     turnLimit size = size * size - 4
 
     initialMoves half = do
-        pushMove $ Move Black (half - 1, half)
-        pushMove $ Move White (half - 1, half - 1)
-        pushMove $ Move Black (half, half - 1)
-        pushMove $ Move White (half, half)
-        putBoard . Board
-                 . updateBoard (Disc Black) [(half - 1, half), (half, half - 1)]
-                 . updateBoard (Disc Black) [(half - 1, half - 1), (half, half)]
-                 . unBoard =<< getBoard
+        putBoard . updateBoard (Disc Black) [(half - 1, half), (half, half - 1)]
+                 . updateBoard (Disc White) [(half - 1, half - 1), (half, half)] =<< getBoard
 
     turn player = do
-        board <- fmap unBoard getBoard
+        board <- getBoard
         if null (enumerateMoves player board)
             then pushMove (NoMove player)
             else do
-                q <- inputMove player
+                q <- inputMove board player
                 let ps = move (Move player q) board
                 when (null ps) $ putError "impossible move"
-                putBoard . Board $ updateBoard (disc player) ps board
-                outputState =<< get
+                putBoard $ updateBoard (Disc player) (q : ps) board
+                pushMove (Move player q)
+        outputState =<< get
 
     isNotEnd = liftM isNotEnd' getMoves
 
@@ -196,7 +183,6 @@ reversi = do
 
     takeWhileM_ _ [] = return ()
     takeWhileM_ a (b : bs) = a b >>= flip when (b >> takeWhileM_ a bs)
-
 
 toDIM2 :: (Int, Int) -> Repa.DIM2
 toDIM2 (a, b) = Repa.Z Repa.:. a Repa.:. b
