@@ -112,7 +112,7 @@ updateBoard c ps board = runIdentity . Repa.computeP $ Repa.fromFunction ex f
 
 data Reversi a =
     LoadBoardSize (Int -> a) |
-    InputMove Board Player ((Int, Int) -> a) |
+    InputMove Board [(Int, Int)] Player ((Int, Int) -> a) |
     OutputState ReversiState a |
     PutError String
     deriving (Typeable, Functor)
@@ -122,8 +122,8 @@ type ReversiM = Free Reversi
 loadBoardSize :: StateT ReversiState ReversiM Int
 loadBoardSize = lift . Free . LoadBoardSize $ Pure
 
-inputMove :: Board -> Player -> StateT ReversiState ReversiM (Int, Int)
-inputMove board player = lift . Free . InputMove board player $ Pure
+inputMove :: Board -> [(Int, Int)] -> Player -> StateT ReversiState ReversiM (Int, Int)
+inputMove board ms player = lift . Free . InputMove board ms player $ Pure
 
 outputState :: ReversiState -> StateT ReversiState ReversiM ()
 outputState s = lift . Free . OutputState s $ Pure ()
@@ -153,23 +153,22 @@ reversi = flip evalStateT initialState $ do
 
     outputState =<< get
 
-    takeWhileM_ (const isNotEnd) . take (turnLimit size) $ cycle [turn Black, turn White]
+    takeWhileM_ (const isNotEnd) $ cycle [turn Black, turn White]
 
     return . judge =<< getBoard
 
     where
-    turnLimit size = size * size - 4
-
-    initialMoves half = do
+    initialMoves half =
         putBoard . updateBoard (Disc Black) [(half - 1, half), (half, half - 1)]
                  . updateBoard (Disc White) [(half - 1, half - 1), (half, half)] =<< getBoard
 
     turn player = do
         board <- getBoard
-        if null (enumerateMoves player board)
+        let ms = enumerateMoves player board
+        if null ms
             then pushMove (NoMove player)
             else do
-                q <- inputMove board player
+                q <- inputMove board ms player
                 let ps = move (Move player q) board
                 when (null ps) $ putError "impossible move"
                 putBoard $ updateBoard (Disc player) (q : ps) board
